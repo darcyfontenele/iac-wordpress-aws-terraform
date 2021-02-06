@@ -7,24 +7,20 @@ terraform {
     }
 }
 
-//PROVIDER - EXTERNALIZAR
-
-provider "aws" {
-    region = var.aws_region
-}
-
-//DATABASE
+//TEMPLATE FILE
 
 data "template_file" "phpconfig" {
-    template = file("files/conf.wp-config.php") //ARQUIVO DE CONFIGURACAO DO BANCO
+    template = file("files/conf.wp-config.php")
     vars = {
-        db_port = aws_db_instance.database.port
-        db_host = aws_db_instance.database.address
-        db_user = aws_db_instance.database.username //ALTERAR PARA VARIAVEL EXTERNA
-        db_pass = aws_db_instance.database.password //ALTERAR PARA VARIAVEL EXTERNA
-        db_name = aws_db_instance.database.name //ALTERAR PARA VARIAVEL EXTERNA
+      db_port = aws_db_instance.database.port
+      db_host = aws_db_instance.database.address
+      db_user = var.aws_db_username
+      db_pass = var.aws_db_password
+      db_name = var.aws_db_name
     }
 }
+
+// S3
 
 resource "aws_s3_bucket_object" "object" {
   bucket = "BUCKET_NAME" //NECESSARIO COLOCAR NOME DO BUCKET
@@ -33,15 +29,17 @@ resource "aws_s3_bucket_object" "object" {
   acl = "public-read"
 }
 
+//DATABASE
+
 resource "aws_db_instance" "database" {
     allocated_storage = 20
     storage_type = "gp2"
     engine = "mysql"
     engine_version = "5.7"
-    instance_class = "db.t2.micro"
-    name = "wordpress" //ALTERAR PARA VARIAVEL EXTERNA
-    username = "iacmysqldb" //ALTERAR PARA VARIAVEL EXTERNA
-    password = "iacmysqldb" //ALTERAR PARA VARIAVEL EXTERNA
+    instance_class = var.aws_db_instance_type
+    name = var.aws_db_name
+    username = var.aws_db_username
+    password = var.aws_db_password
     publicly_accessible = true
     skip_final_snapshot = true
     backup_retention_period = 0
@@ -50,7 +48,7 @@ resource "aws_db_instance" "database" {
     }
 }
 
-// WORDPRESS
+// SECURITY GROUP
 
 resource "aws_security_group" "web" {
   vpc_id = aws_vpc.main.id
@@ -66,7 +64,7 @@ resource "aws_security_group" "web" {
     protocol    = "icmp"
     from_port   = -1
     to_port     = -1
-    cidr_blocks = ["172.31.0.0/16"]
+    cidr_blocks = [aws_vpc.main.cidr_block]
   }
 
   ingress {
@@ -84,23 +82,7 @@ resource "aws_security_group" "web" {
   }
 }
 
-resource "aws_launch_template" "web" {
-  name = "web"
-  instance_type = "t2.micro"
-  key_name = "iacuece"
-  network_interfaces {
-    subnet_id =  aws_subnet.main.id
-    security_groups = [aws_security_group.web.id]
-  }
-  image_id = "ami-01aab85a5e4a5a0fe"
-  placement {
-    availability_zone = "us-east-2a"
-  }
-  user_data = filebase64("./files/userdata.sh")
-  monitoring {
-    enabled = true
-  }
-}
+// VPC/SUBNETS/INTERNET GATEWAY/ROUTING TABLE
 
 resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
@@ -109,6 +91,7 @@ resource "aws_vpc" "main" {
 
 resource "aws_subnet" "main" {
   vpc_id                  = aws_vpc.main.id
+  availability_zone = var.aws_az
   cidr_block              = "10.0.1.0/24"
   map_public_ip_on_launch = true
 }
@@ -125,6 +108,8 @@ resource "aws_default_route_table" "main" {
   }
 }
 
+// LOAD BALANCER
+
 resource "aws_elb" "elb1" {
     name = "terraform-elb"
     security_groups = [aws_security_group.web.id]
@@ -139,7 +124,7 @@ resource "aws_elb" "elb1" {
       healthy_threshold = 2
       unhealthy_threshold = 2
       timeout = 3
-      target = "HTTP:80/"
+      target = "HTTP:80/wp-admin/images/wordpress-logo.svg"
       interval = 30
     }
     cross_zone_load_balancing = true
@@ -148,21 +133,39 @@ resource "aws_elb" "elb1" {
     connection_draining_timeout = 60
 }
 
-resource "aws_autoscaling_group" "web" {
+// INSTANCE TEMPLATE
 
+resource "aws_launch_template" "web" {
+  name = "web"
+  instance_type = var.aws_instance_type
+  key_name = var.aws_key_pair
+  network_interfaces {
+    subnet_id =  aws_subnet.main.id
+    security_groups = [aws_security_group.web.id]
+  }
+  image_id = var.aws_ami
+  placement {
+    availability_zone = var.aws_az
+  }
+  user_data = filebase64("./files/userdata.sh")
+  monitoring {
+    enabled = true
+  }
+}
+
+// AUTO SCALING GROUP
+
+resource "aws_autoscaling_group" "web" {
   min_size             = 1
-  max_size             = 2
-  
+  max_size             = 4
   health_check_type    = "ELB"
   load_balancers = [
     aws_elb.elb1.id
   ]
-
   launch_template {
     id      = aws_launch_template.web.id
     version = "$Latest"
   }
-
   enabled_metrics = [
     "GroupMinSize",
     "GroupMaxSize",
@@ -170,21 +173,17 @@ resource "aws_autoscaling_group" "web" {
     "GroupInServiceInstances",
     "GroupTotalInstances"
   ]
-
   metrics_granularity = "1Minute"
-
   vpc_zone_identifier  = [aws_subnet.main.id]
-
-  # Required to redeploy without an outage.
   lifecycle {
     create_before_destroy = true
   }
-
   depends_on = [ 
     aws_s3_bucket_object.object
   ]
-
 }
+
+// POLICIES
 
 resource "aws_autoscaling_policy" "web_policy_up" {
   name = "web_policy_up"

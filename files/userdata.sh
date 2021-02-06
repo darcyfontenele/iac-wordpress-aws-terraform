@@ -18,6 +18,6 @@ cd /home/ec2-user
 wget https://wordpress.org/latest.tar.gz
 tar -xzf latest.tar.gz
 sudo cp -r wordpress/* /var/www/html/
-curl CAMINHO_BUCKET/wp-config.php --output /var/www/html/wp-config.php #NECESSARIO COLOCAR O URL DO ARQUIVO NO BUCKET
+curl BUCKET_PATH/wp-config.php --output /var/www/html/wp-config.php #NECESSARIO COLOCAR O URL DO ARQUIVO NO BUCKET
 chown -R apache:apache /var/www/html
 sudo service httpd restart
